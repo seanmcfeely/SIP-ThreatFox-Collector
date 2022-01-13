@@ -1,0 +1,20 @@
+version: '3.4'
+
+services:
+    python:
+      build:
+          context: ./collector
+          args:
+              - http_proxy
+              - https_proxy
+              - THREATFOX_API_KEY
+      networks:
+          - threatfox
+
+      # If you do not want any error_reports and collection logs available on the host, comment the following out.
+      #volumes:
+      #    - /opt/SIP-ThreatFox-Collector/error_reports:/SIP-ThreatFox-Collector/error_reports
+      #    - /opt/SIP-ThreatFox-Collector/logs:/SIP-ThreatFox-Collector/logs
+
+networks:
+  threatfox:
