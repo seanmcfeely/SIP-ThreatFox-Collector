@@ -18,6 +18,9 @@ import time
 import traceback
 import uuid
 
+from typing import List
+from urllib.parse import urlparse
+
 import dateutil.parser
 from threatfox import ThreatFoxClient
 from threatfox.config import get_api_key
@@ -90,7 +93,14 @@ def load_ioc(ioc_path: str):
     return data
 
 def create_sip_indicator(sip: pysip.pysip.Client, data: dict):
-    """Create a SIP indicator."""
+    """Create a SIP indicator.
+    
+    Args:
+      sip: A pysip client.
+      data: Dictionary representation of a sip indicator you want to create.
+    Returns:
+      The unique ID of the SIP indicator that was created or False.
+    """
     logging.info(f"Attempting to create SIP indicator with following data: {data}")
     if not data['value']:
         logging.error(f"proposed indicator value is empty.")
@@ -114,6 +124,85 @@ def create_sip_indicator(sip: pysip.pysip.Client, data: dict):
         write_error_report(f"unidentified problem creating SIP indicator. saved indicator to {save_path}: {e}")
 
     return False
+
+def format_indicator_for_sip(type: str, 
+                       value: str,
+                       reference: dict,
+                       tags: list,
+                       username: str,
+                       case_sensitive=False) -> dict:
+        # A sip indicator with some defaults defined.
+        return { 'type':type,
+                 'status': 'New',
+                 'confidence': 'low',
+                 'impact' : 'unknown',
+                 'value' : value,
+                 'references' : [ {'source':"ThreatFox", 'reference': json.dumps(reference)}],
+                 'username' :username,
+                 'case_sensitive': case_sensitive,
+                 'tags': list(set(tags)) if isinstance(tags, list) else []
+                }
+
+def yield_attractive_threatfox_iocs(filter_map: dict, iocs: List[dict]):
+    """Filter ThreatFox IOCs.
+
+    Filter by type, submitter, malware, confidence level, etc.
+
+    Args:
+      filter_map: Config describing malware IOCs to collect.
+      ioc: An IOC to filter.
+    Returns:
+      True if we want to filter the IOC out. False if it should be skipped.
+    """
+    platforms = filter_map.get("platforms").split(',') if filter_map.get("platforms") else []
+    require_malware_signature = filter_map.getboolean("require_malware_signature")
+    malware_famlies = filter_map.get("malware").split(',') if filter_map.get("malware") else []
+    threat_types = filter_map.get("threat_type").split(',') if filter_map.get("threat_type") else []
+    confidence_level = filter_map.getint("confidence_level", 50)
+    ioc_types = filter_map.get("ioc_type").split(',') if filter_map.get("ioc_type") else []
+    accepted_reporters = filter_map.get("accepted_reporters").split(',') if filter_map.get("accepted_reporters") else []
+    ignore_these_reporters = filter_map.get("ignore_these_reporters").split(',') if filter_map.get("ignore_these_reporters") else []
+
+    # NOTE the list is reversed. If they change their app then it will break this collector.
+    for ioc in iocs:
+        ioc_platform = None
+        if ioc.get("malware"):
+            ioc_platform = ioc["malware"].split('.')[0] if '.' in ioc["malware"] else None
+
+        if platforms:
+            if not ioc_platform:
+                #likely means the IOC doesn't have a malware family assigned
+                logging.debug(f"skipping {ioc.get('id')}: ioc_platform not defined.")
+                continue
+            if ioc_platform not in platforms:
+                logging.debug(f"skipping {ioc.get('id')}: {ioc_platform} not in {platforms}")
+                continue
+        if require_malware_signature and not ioc.get("malware"):
+            logging.debug(f"skipping {ioc.get('id')}: does not have a malware family assigned.")
+            continue
+        if malware_famlies:
+            if ioc.get("malware") and ioc.get("malware") not in malware_famlies:
+                logging.debug(f"skipping {ioc.get('id')}: {ioc.get('malware')} not in {malware_famlies}")
+                continue
+        if threat_types:
+            if ioc.get("threat_type") and ioc.get("threat_type") not in threat_types:
+                logging.debug(f"skipping {ioc.get('id')}: {ioc.get('threat_type')} not in {threat_types}")
+                continue
+        if ioc["confidence_level"] < confidence_level:
+            logging.debug(f"skipping {ioc.get('id')}: below confidence threshold.")
+            continue
+        if ioc_types and ioc["ioc_type"] not in ioc_types:
+            logging.debug(f"skipping {ioc.get('id')}: not collecting this ioc type.")
+            continue
+        if accepted_reporters and ioc["reporters"] not in accepted_reporters:
+            logging.debug(f"skipping {ioc.get('id')}: {ioc.get('reporters')} not in accepted reporters: {accepted_reporters}")
+            continue
+        if ignore_these_reporters and ioc["reporters"] in ignore_these_reporters:
+            logging.debug(f"skipping {ioc.get('id')}: {ioc.get('reporters')} in ignored reporters: {ignore_these_reporters}")
+            continue
+        
+        # good ioc
+        yield ioc
 
 
 async def collect(config):
@@ -153,7 +242,7 @@ async def collect(config):
         start_time = start_datetime.strftime("%Y-%m-%d %H:%M:%S")
         logging.info(f"start time adjusted to {start_time}")
 
-    # last collected IOC ID
+    # last collected IOC ID records the last successful IOC obtained from ThreatFox
     last_collected_ioc_id = 0
     last_collected_ioc_id_variable_path = os.path.join(HOME_PATH, "var", f"last_collected_ioc_id")
     if not os.path.exists(os.path.join(last_collected_ioc_id_variable_path)):
@@ -162,34 +251,23 @@ async def collect(config):
         try:
             with open(last_collected_ioc_id_variable_path, "r") as fp:
                 last_collected_ioc_id = int(fp.read())
-            logging.debug(f"last successful ioc collected: {last_collected_ioc_id}")
+            logging.debug(f"last successful ioc collected from ThreatFox: {last_collected_ioc_id}")
         except Exception as e:
             logging.error(str(e))
             return False
 
     # connect to sip
-    verify_ssl = config['sip'].get('verify_ssl')
-    if not os.path.exists(verify_ssl):
-        verify_ssl=config['sip'].getboolean('verify_ssl')
-    sip = pysip.Client(f"{config['sip'].get('server')}:{config['sip'].get('port')}", config['sip']['api_key'], verify=verify_ssl)
+    sip = config["sip"].getboolean("enabled")
+    if sip:
+        verify_ssl = config['sip'].get('verify_ssl')
+        if not os.path.exists(verify_ssl):
+            verify_ssl=config['sip'].getboolean('verify_ssl')
+        sip = pysip.Client(f"{config['sip'].get('server')}:{config['sip'].get('port')}", config['sip']['api_key'], verify=verify_ssl)
+    create_domain_name_indicators_from_payload_urls = config["sip"].getboolean("create_domain_name_indicators_from_payload_urls")
 
-    def _sip_indicator(type: str, 
-                       value: str,
-                       reference: dict,
-                       tags: list,
-                       username=config['sip'].get('user'),
-                       case_sensitive=False) -> dict:
-        # A sip indicator with some defaults defined.
-        return { 'type':type,
-                 'status': 'New',
-                 'confidence': 'low',
-                 'impact' : 'unknown',
-                 'value' : value,
-                 'references' : [ {'source':"ThreatFox", 'reference': json.dumps(reference)}],
-                 'username' :username,
-                 'case_sensitive': case_sensitive,
-                 'tags': list(set(tags))
-                }
+
+    # For filtering IOCs by malware, confidence_level, submitter, etc.
+    threatfox_ioc_filter = config["threatfox_ioc_filter"]
 
     # map ThreatFox IOCs to SIP IOCs
     sip_map = config['sip_mappings']
@@ -199,65 +277,116 @@ async def collect(config):
     api_url = config["threatfox"].get("url") if config["threatfox"].get("url") else None
 
     threatfox_proxy = config["threatfox"].get("proxy")
-    collect_ioc_types = config["collect_ioc_types"]
-    ioc_types = [et for et in collect_ioc_types.keys() if collect_ioc_types.getboolean(et)]
+
+    indicators_created = 0
 
     # Check for incoming iocs that still need to be processing.
     ioc_paths = get_incoming_ioc_paths()
     logging.info(f"Found {len(ioc_paths)} incoming iocs...")
     if ioc_paths:
         iocs_from_storage = 0
-        # Verify we haven't already processed this IOC before
-        # this can be done by IOC ID or IOC type/value
+        for ioc_path in ioc_paths:
+            ioc = load_ioc(ioc_path)
+            ioc_id = int(ioc["id"])
+            # TODO: filter IOCs again here?
+            #for _ioc in yield_attractive_threatfox_iocs(threatfox_ioc_filter, [ioc]):
+            #    if not _ioc:
+            #        continue
+            #ioc = next(ioc)
+            # post to SIP
+            ioc_type = ioc["ioc_type"]
+            ioc_type = 'ip' if ioc_type == 'ip:port' else ioc_type
+            itype = sip_map[ioc_type]
+            ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference', 'confidence_level']}
+            tags = ioc["tags"] if ioc.get("tags") else []
+            tags.append(ioc["malware_printable"])
+            idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
+            if ioc["confidence_level"] == 100:
+                idata["confidence"] = "high"
+            result = create_sip_indicator(sip, idata) if sip else None
+            if result:
+                logging.info(f"created sip indictor ID={result}")
+                last_processed_ioc_id = ioc_id
+                iocs_from_storage += 1
+                indicators_created += 1
+                os.remove(ioc_path)
+            # else: failed to post indicator to SIP
+
+            if create_domain_name_indicators_from_payload_urls and ioc_type == "url" and ioc["threat_type"] == "payload_delivery":
+                logging.debug(f"attempting to extract domain indicator from {ioc_id}")
+                domain = urlparse(ioc['ioc']).netloc
+                if not domain:
+                    continue
+                idata = format_indicator_for_sip(type='URI - Domain Name', value=domain, reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
+                result = create_sip_indicator(sip, idata) if sip else None
+                if result:
+                    logging.info(f"created sip indictor ID={result}")
+                    indicators_created += 1
 
         logging.info(f"successfully posted {iocs_from_storage} to SIP.")
 
-    # TODO: filter IOCs by malware, confidence_level, submitter, etc.
-    # get any new iocs
-    total_ioc_count = 0
-    indicators_created = 0
-    indicators_stored = 0
-    async with ThreatFoxClient(url=api_url, api_key=api_key) as tfc:
-        collection_days = (end_datetime - start_datetime).days
-        collection_days = collection_days if collection_days > 0 else 1
-        logging.info(f"Collecting ThreatFox iocs from past {collection_days} days")
-        results = await tfc.get_iocs(days=collection_days)
-        query_status = results.get("query_status")
-        if query_status != "ok":
-            logging.error(f"got unexpected query status: {query_status}")
-            return False
-        if results and "data" in results:
-            iocs = results["data"]
-            total_ioc_count = len(iocs)
-            logging.debug(f"got {total_ioc_count} IOC results")
-            for ioc in iocs:
-                # let an error raise if the data changes
-                ioc_id = int(ioc["id"])
-                if ioc_id < last_collected_ioc_id:
-                    continue
-                logging.debug(f"obtained new ioc id: {ioc_id}")
-                # TODO: post to SIP
-                ioc_type = ioc["ioc_type"]
-                ioc_type = 'ip' if ioc_type == 'ip:port' else ioc_type
-                itype = sip_map[ioc_type]
-                ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference']}
-                tags = ioc["tags"].append(ioc["malware_printable"])
-                idata = _sip_indicator(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=ioc["tags"])
-                result = create_sip_indicator(sip, idata)
-                if result:
-                    logging.info(f"created sip indictor ID={result}")
-                    last_collected_ioc_id = ioc_id
-                    indicators_created += 1
-                else:
-                    # SIP post failed, write locally to get picked back up later.
-                    with open(os.path.join(STORED_DIR, f"{ioc_id}.json"), "w") as fp:
-                        fp.write(json.dumps(ioc))
+    process_from_storage_only = config["collection_settings"].getboolean("process_from_storage_only")
+    if not process_from_storage_only:
+        # get any new iocs
+        total_ioc_count = 0
+        indicators_stored = 0
+        async with ThreatFoxClient(url=api_url, api_key=api_key) as tfc:
+            collection_days = (end_datetime - start_datetime).days
+            collection_days = collection_days if collection_days > 0 else 1
+            logging.info(f"Collecting ThreatFox iocs from past {collection_days} days")
+            results = await tfc.get_iocs(days=collection_days)
+            query_status = results.get("query_status")
+            if query_status != "ok":
+                logging.error(f"got unexpected query status: {query_status}")
+                return False
+            if results and "data" in results:
+                iocs = results["data"]
+                # NOTE: We reverse the list as they come in from newest to oldest. Should we use the last_seen field instead?
+                iocs.reverse()
+                total_ioc_count = len(iocs)
+                logging.debug(f"got {total_ioc_count} IOC results")
+                # NOTE: filter IOCs here
+                for ioc in yield_attractive_threatfox_iocs(threatfox_ioc_filter, iocs):
+                    # let an error raise if the data changes
+                    ioc_id = int(ioc["id"])
+                    if ioc_id < last_collected_ioc_id:
+                        logging.debug(f"already collected ThreatFox IOC: {ioc_id}")
+                        continue
+                    logging.debug(f"obtained new ioc id: {ioc_id}")
+                    # post to SIP
+                    ioc_type = ioc["ioc_type"]
+                    ioc_type = 'ip' if ioc_type == 'ip:port' else ioc_type
+                    itype = sip_map[ioc_type]
+                    ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference']}
+                    tags = ioc["tags"] if ioc.get("tags") else []
+                    tags.append(ioc["malware_printable"])
+                    idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
+                    result = create_sip_indicator(sip, idata) if sip else None
+                    if result:
+                        logging.info(f"created sip indictor ID={result}")
                         last_collected_ioc_id = ioc_id
-                        indicators_stored += 1
+                        indicators_created += 1
+                    else:
+                        # SIP post failed, write locally to get picked back up later.
+                        with open(os.path.join(STORED_DIR, f"{ioc_id}.json"), "w") as fp:
+                            fp.write(json.dumps(ioc))
+                            last_collected_ioc_id = ioc_id
+                            indicators_stored += 1
 
-    logging.info(
-        f"Collected {total_ioc_count} iocs. Created {indicators_created} SIP indicators. Stored {indicators_stored} in {STORED_DIR_NAME}."
-    )
+                    if create_domain_name_indicators_from_payload_urls and ioc_type == "url" and ioc["threat_type"] == "payload_delivery":
+                        logging.debug(f"attempting to extract domain indicator from {ioc_id}")
+                        domain = urlparse(ioc['ioc']).netloc
+                        if not domain:
+                            continue
+                        idata = format_indicator_for_sip(type='URI - Domain Name', value=domain, reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
+                        result = create_sip_indicator(sip, idata) if sip else None
+                        if result:
+                            logging.info(f"created sip indictor ID={result}")
+                            indicators_created += 1
+
+        logging.info(
+            f"Collected {total_ioc_count} iocs. Created {indicators_created} SIP indicators. Stored {indicators_stored} in {STORED_DIR_NAME}."
+        )
 
     # If here, we consider the collection a success and update our variables.
     try:
@@ -292,6 +421,20 @@ async def main():
         dest="config_path",
         help="Path to configuration file.  Defaults to etc/config.ini",
     )
+    parser.add_argument(
+        "-s",
+        "--single-execution",
+        action="store_true",
+        default=False,
+        help="If true, the collector will execute once and exit instead of starting the collection loop.",
+    )
+    parser.add_argument(
+        "-pl",
+        "--process-local-storage-only",
+        action="store_true",
+        default=False,
+        help="If true, only locally stored ThreatFox IOCs will be processed. ThreatFox will not be queried for new IOCs.",
+    )
 
     args = parser.parse_args()
 
@@ -317,6 +460,13 @@ async def main():
     config = configparser.ConfigParser()
     config.optionxform = str  # preserve case
     config.read(args.config_path)
+
+    if args.process_local_storage_only:
+        config["collection_settings"]["process_from_storage_only"] = "yes"
+
+    if args.single_execution:
+        await collect(config)
+        return True
 
     run_delay_seconds = config["collection_settings"].getint("run_delay_seconds", 300)
     while True:
