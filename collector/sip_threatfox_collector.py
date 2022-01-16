@@ -132,6 +132,8 @@ def format_indicator_for_sip(type: str,
                        username: str,
                        case_sensitive=False) -> dict:
         # A sip indicator with some defaults defined.
+        if "ThreatFox" not in tags:
+            tags.append("ThreatFox")
         return { 'type':type,
                  'status': 'New',
                  'confidence': 'low',
@@ -288,19 +290,24 @@ async def collect(config):
         for ioc_path in ioc_paths:
             ioc = load_ioc(ioc_path)
             ioc_id = int(ioc["id"])
-            # TODO: filter IOCs again here?
-            #for _ioc in yield_attractive_threatfox_iocs(threatfox_ioc_filter, [ioc]):
-            #    if not _ioc:
-            #        continue
-            #ioc = next(ioc)
+            # NOTE: not filtering IOCs again.
             # post to SIP
             ioc_type = ioc["ioc_type"]
             ioc_type = 'ip' if ioc_type == 'ip:port' else ioc_type
+            if ioc_type == 'ip' and ":" in ioc['ioc']:
+                ioc['ioc'] = ioc['ioc'].split(":")[0]
             itype = sip_map[ioc_type]
-            ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference', 'confidence_level']}
-            tags = ioc["tags"] if ioc.get("tags") else []
+            ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference', 'confidence_level', 'reporter']}
+            tags = []
+            unique_tags = []
+            if isinstance(ioc.get("tags"), list):
+                for _t in ioc["tags"]:
+                    if _t.lower() not in unique_tags:
+                        unique_tags.append(_t.lower)
+                        # capture the case
+                        tags.append(_t)
             tags.append(ioc["malware_printable"])
-            idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
+            idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=tags, username=config['sip'].get('user'))
             if ioc["confidence_level"] == 100:
                 idata["confidence"] = "high"
             result = create_sip_indicator(sip, idata) if sip else None
@@ -317,7 +324,7 @@ async def collect(config):
                 domain = urlparse(ioc['ioc']).netloc
                 if not domain:
                     continue
-                idata = format_indicator_for_sip(type='URI - Domain Name', value=domain, reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
+                idata = format_indicator_for_sip(type='URI - Domain Name', value=domain, reference=ioc_reference, tags=tags, username=config['sip'].get('user'))
                 result = create_sip_indicator(sip, idata) if sip else None
                 if result:
                     logging.info(f"created sip indictor ID={result}")
@@ -356,9 +363,18 @@ async def collect(config):
                     # post to SIP
                     ioc_type = ioc["ioc_type"]
                     ioc_type = 'ip' if ioc_type == 'ip:port' else ioc_type
+                    if ioc_type == 'ip' and ":" in ioc['ioc']:
+                        ioc['ioc'] = ioc['ioc'].split(":")[0]
                     itype = sip_map[ioc_type]
                     ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference']}
-                    tags = ioc["tags"] if ioc.get("tags") else []
+                    tags = []
+                    unique_tags = []
+                    if isinstance(ioc.get("tags"), list):
+                        for _t in ioc["tags"]:
+                            if _t.lower() not in unique_tags:
+                                unique_tags.append(_t.lower)
+                                # capture the case
+                                tags.append(_t)
                     tags.append(ioc["malware_printable"])
                     idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
                     result = create_sip_indicator(sip, idata) if sip else None

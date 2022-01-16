@@ -1,0 +1,7 @@
+error_reports/
+logs/
+problem_indicators/
+incoming_iocs/
+__pycache__
+*.pyc
+.git/
