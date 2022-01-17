@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
-import aiohttp
 import asyncio
 import argparse
-import calendar
 import configparser
 import datetime
 import glob
@@ -14,14 +12,12 @@ import os
 import pysip
 import sys
 import uuid
-import time
 import traceback
 import uuid
 
 from typing import List
 from urllib.parse import urlparse
 
-import dateutil.parser
 from threatfox import ThreatFoxClient
 from threatfox.config import get_api_key
 
@@ -113,6 +109,7 @@ def create_sip_indicator(sip: pysip.pysip.Client, data: dict):
             return result['id']
     except pysip.ConflictError as e:
         logging.info(f"{e} : SIP indicator already exists with value: {data['value']}")
+        raise e
     #pysip.RequestError for is too long
     except Exception as e:
         # this should never happen
@@ -132,6 +129,8 @@ def format_indicator_for_sip(type: str,
                        username: str,
                        case_sensitive=False) -> dict:
         # A sip indicator with some defaults defined.
+        if not tags or not isinstance(tags, list):
+            tags = []
         if "ThreatFox" not in tags:
             tags.append("ThreatFox")
         return { 'type':type,
@@ -142,7 +141,7 @@ def format_indicator_for_sip(type: str,
                  'references' : [ {'source':"ThreatFox", 'reference': json.dumps(reference)}],
                  'username' :username,
                  'case_sensitive': case_sensitive,
-                 'tags': list(set(tags)) if isinstance(tags, list) else []
+                 'tags': list(set(tags))
                 }
 
 def yield_attractive_threatfox_iocs(filter_map: dict, iocs: List[dict]):
@@ -209,7 +208,7 @@ def yield_attractive_threatfox_iocs(filter_map: dict, iocs: List[dict]):
 
 async def collect(config):
 
-    # time variables
+    # variables
     now = datetime.datetime.utcnow()
     start_time = None
     end_datetime = now
@@ -258,6 +257,25 @@ async def collect(config):
             logging.error(str(e))
             return False
 
+    # max_indicators_per_day - keep a throttle on indicators created per day
+    indicators_created_today = 0
+    max_indicators_per_day = config['collection_settings'].getint('max_indicators_per_day')
+    indicator_creation_count_file = os.path.join(HOME_PATH, 'var', f"indicator_count_for_{datetime.datetime.now().strftime('%Y-%m-%d')}")
+    if not os.path.exists(indicator_creation_count_file):
+        logging.info(f"reseting indicator count for a new day..")
+        for old_file in glob.glob(f"{os.path.join(HOME_PATH, 'var')}/indicator_count_for_*"):
+            logging.info(f"deleting old variable file: {old_file}")
+            os.remove(old_file)
+        with open(indicator_creation_count_file, 'w') as f:
+            f.write(str(0))
+    else:
+        with open(indicator_creation_count_file, 'r') as f:
+            indicators_created_today = f.read()
+        indicators_created_today = int(indicators_created_today)
+
+    if indicators_created_today >= max_indicators_per_day:
+        logging.error(f"maximum indicators already created for the day.")
+
     # connect to sip
     sip = config["sip"].getboolean("enabled")
     if sip:
@@ -278,8 +296,6 @@ async def collect(config):
     api_key = config["threatfox"].get("api_key") if config["threatfox"].get("api_key") else None
     api_url = config["threatfox"].get("url") if config["threatfox"].get("url") else None
 
-    threatfox_proxy = config["threatfox"].get("proxy")
-
     indicators_created = 0
 
     # Check for incoming iocs that still need to be processing.
@@ -297,7 +313,7 @@ async def collect(config):
             if ioc_type == 'ip' and ":" in ioc['ioc']:
                 ioc['ioc'] = ioc['ioc'].split(":")[0]
             itype = sip_map[ioc_type]
-            ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference', 'confidence_level', 'reporter']}
+            ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference', 'confidence_level', 'reporter', 'comment']}
             tags = []
             unique_tags = []
             if isinstance(ioc.get("tags"), list):
@@ -310,12 +326,19 @@ async def collect(config):
             idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=tags, username=config['sip'].get('user'))
             if ioc["confidence_level"] == 100:
                 idata["confidence"] = "high"
-            result = create_sip_indicator(sip, idata) if sip else None
+            if indicators_created_today >= max_indicators_per_day:
+                logging.error(f"maximum indicators created for the day.")
+                break
+            try:
+                result = create_sip_indicator(sip, idata) if sip else None
+            except pysip.ConflictError:
+                os.remove(ioc_path)
+                continue
             if result:
                 logging.info(f"created sip indictor ID={result}")
-                last_processed_ioc_id = ioc_id
                 iocs_from_storage += 1
                 indicators_created += 1
+                indicators_created_today += 1
                 os.remove(ioc_path)
             # else: failed to post indicator to SIP
 
@@ -325,10 +348,14 @@ async def collect(config):
                 if not domain:
                     continue
                 idata = format_indicator_for_sip(type='URI - Domain Name', value=domain, reference=ioc_reference, tags=tags, username=config['sip'].get('user'))
-                result = create_sip_indicator(sip, idata) if sip else None
+                try:
+                    result = create_sip_indicator(sip, idata) if sip else None
+                except pysip.ConflictError:
+                    continue
                 if result:
                     logging.info(f"created sip indictor ID={result}")
                     indicators_created += 1
+                    indicators_created_today += 1
 
         logging.info(f"successfully posted {iocs_from_storage} to SIP.")
 
@@ -366,7 +393,7 @@ async def collect(config):
                     if ioc_type == 'ip' and ":" in ioc['ioc']:
                         ioc['ioc'] = ioc['ioc'].split(":")[0]
                     itype = sip_map[ioc_type]
-                    ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference']}
+                    ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference', 'confidence_level', 'reporter', 'comment']}
                     tags = []
                     unique_tags = []
                     if isinstance(ioc.get("tags"), list):
@@ -377,17 +404,27 @@ async def collect(config):
                                 tags.append(_t)
                     tags.append(ioc["malware_printable"])
                     idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
-                    result = create_sip_indicator(sip, idata) if sip else None
-                    if result:
-                        logging.info(f"created sip indictor ID={result}")
-                        last_collected_ioc_id = ioc_id
-                        indicators_created += 1
+                    sip_result = False
+                    if indicators_created_today < max_indicators_per_day:
+                        try:
+                            sip_result = create_sip_indicator(sip, idata) if sip else None
+                        except pysip.ConflictError:
+                            continue
+                        if sip_result:
+                            logging.info(f"created sip indictor ID={sip_result}")
+                            last_collected_ioc_id = ioc_id
+                            indicators_created += 1
+                            indicators_created_today += 1
                     else:
-                        # SIP post failed, write locally to get picked back up later.
+                        logging.warning(f"maximum indicators created for the day.")
+
+                    if not sip_result:
+                        # SIP post failed or max indicators created for the day, write locally to get picked back up later.
                         with open(os.path.join(STORED_DIR, f"{ioc_id}.json"), "w") as fp:
                             fp.write(json.dumps(ioc))
                             last_collected_ioc_id = ioc_id
                             indicators_stored += 1
+                        continue
 
                     if create_domain_name_indicators_from_payload_urls and ioc_type == "url" and ioc["threat_type"] == "payload_delivery":
                         logging.debug(f"attempting to extract domain indicator from {ioc_id}")
@@ -395,10 +432,14 @@ async def collect(config):
                         if not domain:
                             continue
                         idata = format_indicator_for_sip(type='URI - Domain Name', value=domain, reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
-                        result = create_sip_indicator(sip, idata) if sip else None
+                        try:
+                            result = create_sip_indicator(sip, idata) if sip else None
+                        except pysip.ConflictError:
+                            continue
                         if result:
                             logging.info(f"created sip indictor ID={result}")
                             indicators_created += 1
+                            indicators_created_today += 1
 
         logging.info(
             f"Collected {total_ioc_count} iocs. Created {indicators_created} SIP indicators. Stored {indicators_stored} in {STORED_DIR_NAME}."
@@ -417,6 +458,11 @@ async def collect(config):
     except Exception as e:
         write_error_report(f"Problem writing last time file: {e}")
         return False
+    try:
+        with open(indicator_creation_count_file, 'w') as fp:
+            fp.write(str(indicators_created_today))
+    except Exception as e:
+        logging.error(f"Problem writing indicator count file: {e}")
 
 
 async def main():

@@ -8,8 +8,10 @@ HOME_DIR="/opt/SIP-ThreatFox-Collector"
 
 cd $HOME_DIR || { echo "$HOME_DIR does not exist. exiting."; exit 1;}
 
-# activate venv?
+# activate venv
 source .venv/bin/activate
+
+export NO_PROXY=".local"
 
 # collect and process events
 ./sip_threatfox_collector.py
