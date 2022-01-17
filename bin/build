@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-docker image build -t sip-threatfox-collector:latest --build-arg TF_USER_ID=$(id -u) --build-arg TF_GROUP_ID=$(id -g) \
-    --build-arg http_proxy="$http_proxy" --build-arg https_proxy="$https_proxy" --build-arg THREATFOX_API_KEY="$THREATFOX_API_KEY" .

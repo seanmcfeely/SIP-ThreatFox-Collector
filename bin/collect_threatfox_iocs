@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+# just for cron use
+# cron example: */15 * * * * /path/to/SIP-ThreatFox-Collector/bin/collect_threatfox_iocs 2> /path/to/SIP-ThreatFox-Collector/logs/cron.log
+
+# update as needed
+HOME_DIR="/opt/SIP-ThreatFox-Collector"
+
+cd $HOME_DIR || { echo "$HOME_DIR does not exist. exiting."; exit 1;}
+
+# activate venv?
+source .venv/bin/activate
+
+# collect and process events
+./sip_threatfox_collector.py

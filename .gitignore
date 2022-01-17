@@ -1,6 +1,6 @@
 # Local things
 error_reporting/
-collector/etc/config.ini
+etc/config.ini
 logs/
 incoming_iocs/
 problem_indicators/

@@ -196,11 +196,11 @@ def yield_attractive_threatfox_iocs(filter_map: dict, iocs: List[dict]):
         if ioc_types and ioc["ioc_type"] not in ioc_types:
             logging.debug(f"skipping {ioc.get('id')}: not collecting this ioc type.")
             continue
-        if accepted_reporters and ioc["reporters"] not in accepted_reporters:
-            logging.debug(f"skipping {ioc.get('id')}: {ioc.get('reporters')} not in accepted reporters: {accepted_reporters}")
+        if accepted_reporters and ioc["reporter"] not in accepted_reporters:
+            logging.debug(f"skipping {ioc.get('id')}: {ioc.get('reporter')} not in accepted reporters: {accepted_reporters}")
             continue
-        if ignore_these_reporters and ioc["reporters"] in ignore_these_reporters:
-            logging.debug(f"skipping {ioc.get('id')}: {ioc.get('reporters')} in ignored reporters: {ignore_these_reporters}")
+        if ignore_these_reporters and ioc["reporter"] in ignore_these_reporters:
+            logging.debug(f"skipping {ioc.get('id')}: {ioc.get('reporter')} in ignored reporters: {ignore_these_reporters}")
             continue
         
         # good ioc
@@ -480,16 +480,8 @@ async def main():
     if args.process_local_storage_only:
         config["collection_settings"]["process_from_storage_only"] = "yes"
 
-    if args.single_execution:
-        await collect(config)
-        return True
-
-    run_delay_seconds = config["collection_settings"].getint("run_delay_seconds", 300)
-    while True:
-        await collect(config)
-        logging.info(f"waiting {run_delay_seconds} seconds before attempting to collect more iocs ...")
-        await asyncio.sleep(run_delay_seconds)
-
+    await collect(config)
+    return True
 
 if __name__ == "__main__":
     try:
