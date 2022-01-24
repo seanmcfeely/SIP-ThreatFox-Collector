@@ -331,7 +331,7 @@ async def collect(config):
             idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=tags, username=config['sip'].get('user'))
             if ioc["confidence_level"] == 100:
                 idata["confidence"] = "high"
-            if indicators_created_today >= max_indicators_per_day:
+            if ioc_type != "url" and indicators_created_today >= max_indicators_per_day:
                 logging.error(f"maximum indicators created for the day.")
                 break
             try:
@@ -416,7 +416,7 @@ async def collect(config):
 
                     idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
                     sip_result = False
-                    if indicators_created_today < max_indicators_per_day:
+                    if ioc_type != "url" and indicators_created_today < max_indicators_per_day:
                         try:
                             sip_result = create_sip_indicator(sip, idata) if sip else None
                         except pysip.ConflictError:
