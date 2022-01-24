@@ -312,7 +312,10 @@ async def collect(config):
             ioc_type = 'ip' if ioc_type == 'ip:port' else ioc_type
             if ioc_type == 'ip' and ":" in ioc['ioc']:
                 ioc['ioc'] = ioc['ioc'].split(":")[0]
-            itype = sip_map[ioc_type]
+            itype = sip_map.get(ioc_type)
+            if not itype:
+                logging.debug(f"skipping {ioc_type}")
+                continue
             ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference', 'confidence_level', 'reporter', 'comment']}
             tags = []
             unique_tags = []
@@ -392,7 +395,10 @@ async def collect(config):
                     ioc_type = 'ip' if ioc_type == 'ip:port' else ioc_type
                     if ioc_type == 'ip' and ":" in ioc['ioc']:
                         ioc['ioc'] = ioc['ioc'].split(":")[0]
-                    itype = sip_map[ioc_type]
+                    itype = sip_map.get(ioc_type)
+                    if not itype:
+                        logging.debug(f"skipping {ioc_type}")
+                        continue
                     ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference', 'confidence_level', 'reporter', 'comment']}
                     tags = []
                     unique_tags = []
