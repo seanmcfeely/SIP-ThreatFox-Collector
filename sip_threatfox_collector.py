@@ -315,14 +315,16 @@ async def collect(config):
             itype = sip_map[ioc_type]
             ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference', 'confidence_level', 'reporter', 'comment']}
             tags = []
-            unique_tags = []
+            tags.append(ioc["malware_printable"])
+            tags.append(ioc["threat_type"])
+            unique_tags = tags.copy()
             if isinstance(ioc.get("tags"), list):
                 for _t in ioc["tags"]:
                     if _t.lower() not in unique_tags:
                         unique_tags.append(_t.lower)
                         # capture the case
                         tags.append(_t)
-            tags.append(ioc["malware_printable"])
+
             idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=tags, username=config['sip'].get('user'))
             if ioc["confidence_level"] == 100:
                 idata["confidence"] = "high"
@@ -394,15 +396,18 @@ async def collect(config):
                         ioc['ioc'] = ioc['ioc'].split(":")[0]
                     itype = sip_map[ioc_type]
                     ioc_reference = {_f:_v for _f,_v in ioc.items() if _f  in ['id', 'ioc_type_desc', 'reference', 'confidence_level', 'reporter', 'comment']}
+
                     tags = []
-                    unique_tags = []
+                    tags.append(ioc["malware_printable"])
+                    tags.append(ioc["threat_type"])
+                    unique_tags = tags.copy()
                     if isinstance(ioc.get("tags"), list):
                         for _t in ioc["tags"]:
                             if _t.lower() not in unique_tags:
                                 unique_tags.append(_t.lower)
                                 # capture the case
                                 tags.append(_t)
-                    tags.append(ioc["malware_printable"])
+
                     idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
                     sip_result = False
                     if indicators_created_today < max_indicators_per_day:
