@@ -274,7 +274,7 @@ async def collect(config):
         indicators_created_today = int(indicators_created_today)
 
     if indicators_created_today >= max_indicators_per_day:
-        logging.error(f"maximum indicators already created for the day.")
+        logging.warning(f"maximum indicators already created for the day.")
 
     # connect to sip
     sip = config["sip"].getboolean("enabled")
@@ -331,9 +331,11 @@ async def collect(config):
             idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=tags, username=config['sip'].get('user'))
             if ioc["confidence_level"] == 100:
                 idata["confidence"] = "high"
-            if ioc_type != "url" and indicators_created_today >= max_indicators_per_day:
-                logging.error(f"maximum indicators created for the day.")
-                break
+            if indicators_created_today >= max_indicators_per_day:
+                logging.warning(f"maximum {ioc_type} indicators created for the day.")
+                # NOTE: currently creating all url IOCs
+                if ioc_type != "url":
+                    continue
             try:
                 result = create_sip_indicator(sip, idata) if sip else None
             except pysip.ConflictError:
@@ -416,7 +418,8 @@ async def collect(config):
 
                     idata = format_indicator_for_sip(type=itype, value=ioc['ioc'], reference=ioc_reference, tags=ioc["tags"], username=config['sip'].get('user'))
                     sip_result = False
-                    if ioc_type != "url" and indicators_created_today < max_indicators_per_day:
+                    if (indicators_created_today < max_indicators_per_day) or ioc_type == "url":
+                        # NOTE: creating url iocs without limit currently
                         try:
                             sip_result = create_sip_indicator(sip, idata) if sip else None
                         except pysip.ConflictError:
@@ -427,7 +430,7 @@ async def collect(config):
                             indicators_created += 1
                             indicators_created_today += 1
                     else:
-                        logging.warning(f"maximum indicators created for the day.")
+                        logging.warning(f"maximum {ioc_type} indicators created for the day.")
 
                     if not sip_result:
                         # SIP post failed or max indicators created for the day, write locally to get picked back up later.
